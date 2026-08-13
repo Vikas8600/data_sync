@@ -54,11 +54,13 @@
   },
   {
    "columns": 1,
-   "default": "1",
+   "default": "0",
+   "description": "Delete sync is disabled",
    "fieldname": "sync_delete",
    "fieldtype": "Check",
    "in_list_view": 1,
-   "label": "Delete"
+   "label": "Delete",
+   "read_only": 1
   },
   {
    "columns": 1,
