@@ -354,6 +354,38 @@ def mark_failed(entry, reason, response=None):
 			f"Doc Sync Queue {entry.name} gave up after {retry_count} attempts: {reason}"
 		)
 
+	# ponytail: only the first failure is mailed - retries of the same row would
+	# otherwise send one mail per attempt. Move to `>= max_retries` if the team
+	# would rather hear about it once it has given up instead.
+	if retry_count == 1:
+		notify_failure(settings, entry, reason)
+
+
+def notify_failure(settings, entry, reason):
+	recipients = [r.user for r in (settings.notify_users if settings else []) if r.user]
+	if not recipients:
+		return
+
+	try:
+		frappe.sendmail(
+			recipients=recipients,
+			subject=f"Doc Sync failed: {entry.ref_doctype} {entry.ref_docname}",
+			message=(
+				f"<p>A {entry.type.lower()} sync failed on <b>{frappe.local.site}</b>.</p>"
+				f"<ul><li>DocType: {frappe.utils.escape_html(entry.ref_doctype)}</li>"
+				f"<li>Document: {frappe.utils.escape_html(entry.ref_docname)}</li>"
+				f"<li>Event: {entry.event}</li>"
+				f"<li>Queue Row: {entry.name}</li></ul>"
+				f"<p><b>Error</b><br><pre>{frappe.utils.escape_html(reason or '')}</pre></p>"
+			),
+			reference_doctype="Doc Sync Queue",
+			reference_name=entry.name,
+			now=False,
+		)
+	except Exception:
+		# Never let a mail problem take down the sync worker.
+		frappe.log_error(title=f"Doc Sync failure mail not sent: {entry.name}")
+
 
 # ---------------------------------------------------------------------------
 # incoming

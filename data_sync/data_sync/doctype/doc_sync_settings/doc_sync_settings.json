@@ -18,7 +18,9 @@
   "column_break_retry",
   "batch_size",
   "doctypes_section",
-  "sync_doctypes"
+  "sync_doctypes",
+  "notify_section",
+  "notify_users"
  ],
  "fields": [
   {
@@ -97,6 +99,18 @@
    "fieldtype": "Table",
    "label": "Sync DocTypes",
    "options": "Doc Sync DocType"
+  },
+  {
+   "fieldname": "notify_section",
+   "fieldtype": "Section Break",
+   "label": "Failure Notifications"
+  },
+  {
+   "description": "Emailed the first time a queue row fails. Leave empty to send nothing.",
+   "fieldname": "notify_users",
+   "fieldtype": "Table MultiSelect",
+   "label": "Notify Users On Failure",
+   "options": "Assignment Rule User"
   }
  ],
  "grid_page_length": 50,
