@@ -330,7 +330,9 @@ def build_headers(settings):
 
 def mark_failed(entry, reason, response=None):
 	settings = get_settings()
-	max_retries = cint(settings.max_retries) if settings else 5
+	# `or 5` matches retry_failed(), so the mail fires on the same attempt the
+	# scheduler stops retrying on - not one attempt early or late.
+	max_retries = (cint(settings.max_retries) or 5) if settings else 5
 	retry_count = cint(entry.retry_count) + 1
 
 	entry.db_set(
@@ -350,19 +352,18 @@ def mark_failed(entry, reason, response=None):
 		message=f"{reason}\n\n{response or ''}",
 	)
 
+	# Mailed only once the row has given up: the scheduler stops retrying at
+	# max_retries, so this fires on the last attempt and not on the transient
+	# failures before it. A manual Retry Now resets the counter, so a row that
+	# fails again after that will mail again.
 	if retry_count >= max_retries:
 		frappe.logger("data_sync").error(
 			f"Doc Sync Queue {entry.name} gave up after {retry_count} attempts: {reason}"
 		)
-
-	# ponytail: only the first failure is mailed - retries of the same row would
-	# otherwise send one mail per attempt. Move to `>= max_retries` if the team
-	# would rather hear about it once it has given up instead.
-	if retry_count == 1:
-		notify_failure(settings, entry, reason)
+		notify_failure(settings, entry, reason, retry_count, max_retries)
 
 
-def notify_failure(settings, entry, reason):
+def notify_failure(settings, entry, reason, retry_count, max_retries):
 	recipients = [r.user for r in (settings.notify_users if settings else []) if r.user]
 	if not recipients:
 		return
@@ -370,9 +371,12 @@ def notify_failure(settings, entry, reason):
 	try:
 		frappe.sendmail(
 			recipients=recipients,
-			subject=f"Doc Sync failed: {entry.ref_doctype} {entry.ref_docname}",
+			subject=f"Doc Sync gave up: {entry.ref_doctype} {entry.ref_docname}",
 			message=(
-				f"<p>A {entry.type.lower()} sync failed on <b>{frappe.local.site}</b>.</p>"
+				f"<p>A {entry.type.lower()} sync failed on <b>{frappe.local.site}</b> "
+				f"and has stopped retrying after {retry_count} of {max_retries} attempts. "
+				f"It will not be retried again unless someone opens the queue row and "
+				f"presses <b>Retry Now</b>.</p>"
 				f"<ul><li>DocType: {frappe.utils.escape_html(entry.ref_doctype)}</li>"
 				f"<li>Document: {frappe.utils.escape_html(entry.ref_docname)}</li>"
 				f"<li>Event: {entry.event}</li>"
@@ -393,11 +397,15 @@ def notify_failure(settings, entry, reason):
 # ---------------------------------------------------------------------------
 
 
-def log_incoming(doctype, docname, event, origin_site, idempotency_key, payload):
-	"""Record an incoming change. Returns (entry, is_duplicate)."""
-	existing = frappe.db.get_value(
+def find_incoming_entry(idempotency_key):
+	return frappe.db.get_value(
 		"Doc Sync Queue", {"idempotency_key": idempotency_key, "type": "Incoming"}, "name"
 	)
+
+
+def log_incoming(doctype, docname, event, origin_site, idempotency_key, payload):
+	"""Record an incoming change. Returns (entry, is_duplicate)."""
+	existing = find_incoming_entry(idempotency_key)
 	if existing:
 		return frappe.get_doc("Doc Sync Queue", existing), True
 
@@ -415,7 +423,24 @@ def log_incoming(doctype, docname, event, origin_site, idempotency_key, payload)
 		}
 	)
 	entry.flags.ignore_permissions = True
-	entry.insert(ignore_permissions=True)
+
+	# The check above is not atomic: the sender can retry a push whose first
+	# attempt is still being logged here, and both requests get past it. The
+	# unique index is the real arbiter - if it rejects the insert, the other
+	# request won the race and its row is the one to use. A savepoint keeps the
+	# failed INSERT from poisoning the rest of this transaction.
+	frappe.db.savepoint("data_sync_log_incoming")
+	try:
+		entry.insert(ignore_permissions=True)
+	except frappe.UniqueValidationError:
+		frappe.db.rollback(save_point="data_sync_log_incoming")
+
+		existing = find_incoming_entry(idempotency_key)
+		if not existing:
+			raise
+
+		return frappe.get_doc("Doc Sync Queue", existing), True
+
 	return entry, False
 
 

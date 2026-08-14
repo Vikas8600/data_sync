@@ -106,7 +106,7 @@
    "label": "Failure Notifications"
   },
   {
-   "description": "Emailed the first time a queue row fails. Leave empty to send nothing.",
+   "description": "Emailed once a queue row has failed Max Retries times and stopped retrying. Leave empty to send nothing.",
    "fieldname": "notify_users",
    "fieldtype": "Table MultiSelect",
    "label": "Notify Users On Failure",
