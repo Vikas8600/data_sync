@@ -29,10 +29,6 @@ class DocSyncSettings(Document):
 	def validate_doctypes(self):
 		seen = set()
 		for row in self.sync_doctypes or []:
-			# ponytail: delete sync is off for good - the field is read-only in the
-			# grid, this clears rows saved before that and anything set over the API.
-			row.sync_delete = 0
-
 			if row.ref_doctype in BLOCKED_DOCTYPES:
 				frappe.throw(f"Row {row.idx}: {row.ref_doctype} cannot be synced")
 
