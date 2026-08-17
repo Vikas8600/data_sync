@@ -39,6 +39,18 @@ VOLATILE_FIELDS = {
 # after the save so the synced document keeps the real originating user.
 AUDIT_FIELDS = ("owner", "creation", "modified", "modified_by")
 
+# Provenance. Any DocType carrying these gets stamped on insert with where the
+# document was created: the flag is 1 on the copy that arrived from the other
+# server and stays 0 on the one that was created locally.
+#
+# They are stripped from every payload and only ever written on insert. Taking
+# the remote value would flip the meaning the first time a document is edited on
+# the other side and synced back - each server's copy has to keep its own
+# answer.
+ORIGIN_FLAG_FIELD = "is_from_other_server"
+ORIGIN_SITE_FIELD = "sync_origin_site"
+ORIGIN_FIELDS = (ORIGIN_FLAG_FIELD, ORIGIN_SITE_FIELD)
+
 # DocTypes that must never sync, whatever the settings say.
 BLOCKED_DOCTYPES = {
 	"Doc Sync Queue",
@@ -483,7 +495,13 @@ def apply_entry(entry_name):
 		if entry.event == "Delete":
 			delete_doc(entry.ref_doctype, entry.ref_docname)
 		else:
-			upsert_doc(entry.ref_doctype, entry.ref_docname, payload, dropped)
+			upsert_doc(
+				entry.ref_doctype,
+				entry.ref_docname,
+				payload,
+				dropped,
+				origin_site=entry.origin_site,
+			)
 
 		frappe.db.commit()
 		entry.db_set(
@@ -556,12 +574,16 @@ def sanitize_for_local(doctype, data, dropped, prefix=""):
 	return out
 
 
-def upsert_doc(doctype, docname, payload, dropped=None):
+def upsert_doc(doctype, docname, payload, dropped=None, origin_site=None):
 	payload = clean_payload(payload)
 	payload = sanitize_for_local(doctype, payload, dropped if dropped is not None else [])
 	payload["doctype"] = doctype
 	payload["name"] = docname
 	target_docstatus = cint(payload.get("docstatus"))
+
+	# Each server's copy keeps its own provenance; see ORIGIN_FIELDS.
+	for field in ORIGIN_FIELDS:
+		payload.pop(field, None)
 
 	# Kept aside for restore_audit_fields(); see AUDIT_FIELDS.
 	audit = {field: payload.pop(field, None) for field in AUDIT_FIELDS}
@@ -593,6 +615,14 @@ def upsert_doc(doctype, docname, payload, dropped=None):
 	# Insert as a draft first so validation runs the same way it did on the
 	# origin server, then move it to the remote docstatus.
 	payload["docstatus"] = 0
+
+	# Stamped before the insert so controller hooks can already read it.
+	meta = frappe.get_meta(doctype)
+	if meta.has_field(ORIGIN_FLAG_FIELD):
+		payload[ORIGIN_FLAG_FIELD] = 1
+	if origin_site and meta.has_field(ORIGIN_SITE_FIELD):
+		payload[ORIGIN_SITE_FIELD] = origin_site
+
 	doc = frappe.get_doc(payload)
 	doc.flags.ignore_permissions = True
 	doc.flags.ignore_mandatory = True
