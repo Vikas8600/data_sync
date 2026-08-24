@@ -17,7 +17,7 @@ import json
 import frappe
 import requests
 from frappe.model import child_table_fields, default_fields, table_fields
-from frappe.utils import cint, now_datetime
+from frappe.utils import cint, getdate, now_datetime
 
 # Keys that are local to a site or recomputed on save - never shipped.
 VOLATILE_FIELDS = {
@@ -757,6 +757,159 @@ def resync_doc(doctype, docname):
 	doc = frappe.get_doc(doctype, docname)
 	capture(doc, "on_update")
 	return True
+
+
+@frappe.whitelist()
+def backfill(
+	doctype,
+	from_date=None,
+	to_date=None,
+	date_field="creation",
+	limit=None,
+	batch_size=None,
+	include_synced=0,
+	dry_run=0,
+):
+	"""Queue existing documents for sync.
+
+	The outgoing hook only ever fires on a change, so documents that already
+	existed when a DocType was switched on are never sent. This walks them and
+	queues each one exactly as an edit would have.
+
+	Re-runnable: a document that already has a Synced outgoing row is skipped
+	unless `include_synced` is set.
+
+	Args:
+		doctype (str): DocType to backfill. Must be enabled in Doc Sync Settings.
+		from_date (str, optional): Only documents dated on/after this date.
+		to_date (str, optional): Only documents dated on/before this date.
+		date_field (str, optional): Which date the bounds apply to - "creation"
+			(when the document was made) or "modified" (when it last changed).
+		limit (int, optional): Stop after this many documents.
+		batch_size (int, optional): Documents per background job. Defaults to the
+			batch size in Doc Sync Settings, else 50.
+		include_synced (int, optional): Re-send documents already synced.
+		dry_run (int, optional): Report what would be queued, change nothing.
+
+	Returns:
+		dict: {"doctype", "matched", "queued", "skipped", "dry_run"}
+	"""
+	frappe.only_for("System Manager")
+
+	settings = get_settings()
+	if not settings:
+		frappe.throw("Doc Sync Settings is not available")
+
+	# A dry run only counts documents, so it stays useful for sizing the job
+	# before sync is switched on. Only a real run needs a working target.
+	if not cint(dry_run) and (not settings.enabled or not settings.target_url):
+		frappe.throw("Data Sync is disabled or Target URL is not set")
+
+	if doctype in BLOCKED_DOCTYPES:
+		frappe.throw(f"'{doctype}' can never be synced")
+
+	rule = get_doctype_rule(settings, doctype)
+	if not rule:
+		frappe.throw(f"'{doctype}' is not enabled in Doc Sync Settings")
+
+	# The target upserts, so an Update carries a missing document too. Fall back
+	# to Insert for a rule that only allows inserts.
+	event = "Update" if rule.sync_update else ("Insert" if rule.sync_insert else None)
+	if not event:
+		frappe.throw(f"'{doctype}' has neither Sync Update nor Sync Insert enabled")
+
+	if date_field not in ("creation", "modified"):
+		frappe.throw("date_field must be either 'creation' or 'modified'")
+
+	# A Date bound compared against a Datetime column must cover the day.
+	start = f"{getdate(from_date)} 00:00:00" if from_date else None
+	end = f"{getdate(to_date)} 23:59:59" if to_date else None
+
+	filters = {}
+	if start and end:
+		filters[date_field] = ["between", [start, end]]
+	elif start:
+		filters[date_field] = [">=", start]
+	elif end:
+		filters[date_field] = ["<=", end]
+
+	names = frappe.get_all(
+		doctype,
+		filters=filters,
+		pluck="name",
+		order_by=f"{date_field} asc",
+		limit_page_length=cint(limit) or 0,
+	)
+
+	result = {
+		"doctype": doctype,
+		"date_field": date_field,
+		"matched": len(names),
+		"queued": 0,
+		"skipped": 0,
+		"jobs": 0,
+		"dry_run": bool(cint(dry_run)),
+	}
+
+	if not cint(include_synced):
+		# One query for the whole DocType: a per-document check would be thousands
+		# of round trips on a full backfill.
+		synced = set(already_synced_names(doctype))
+		pending = [name for name in names if name not in synced]
+		result["skipped"] = len(names) - len(pending)
+		names = pending
+
+	result["queued"] = len(names)
+
+	if cint(dry_run):
+		return result
+
+	# Batched rather than one job per document: a full backfill is thousands of
+	# documents, and that many jobs would swamp the worker queue on its own.
+	chunk = cint(batch_size) or cint(settings.batch_size) or 50
+	for index in range(0, len(names), chunk):
+		frappe.enqueue(
+			"data_sync.sync.backfill_batch",
+			queue="long",
+			job_id=f"data_sync::backfill::{doctype}::{index}",
+			deduplicate=True,
+			timeout=3600,
+			doctype=doctype,
+			names=names[index : index + chunk],
+			event=event,
+		)
+		result["jobs"] += 1
+
+	return result
+
+
+def already_synced_names(doctype):
+	"""Documents of this DocType that have already gone out successfully."""
+	return frappe.get_all(
+		"Doc Sync Queue",
+		filters={"type": "Outgoing", "status": "Synced", "ref_doctype": doctype},
+		pluck="ref_docname",
+		distinct=True,
+	)
+
+
+def backfill_batch(doctype, names, event="Update"):
+	"""Queue a batch of existing documents.
+
+	Each document is handled on its own so one bad record is logged and stepped
+	over instead of taking the rest of the batch down with it.
+	"""
+	method = "after_insert" if event == "Insert" else "on_update"
+
+	for docname in names or []:
+		if not frappe.db.exists(doctype, docname):
+			continue
+		try:
+			capture(frappe.get_doc(doctype, docname), method)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title=f"Doc Sync backfill failed: {doctype} {docname}")
 
 
 @frappe.whitelist()
