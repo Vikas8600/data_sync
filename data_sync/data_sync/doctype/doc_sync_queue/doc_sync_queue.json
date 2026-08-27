@@ -37,7 +37,8 @@
    "in_standard_filter": 1,
    "label": "Type",
    "options": "Outgoing\nIncoming",
-   "reqd": 1
+   "reqd": 1,
+   "search_index": 1
   },
   {
    "default": "Update",
@@ -55,7 +56,8 @@
    "in_standard_filter": 1,
    "label": "Ref Doctype",
    "options": "DocType",
-   "reqd": 1
+   "reqd": 1,
+   "search_index": 1
   },
   {
    "fieldname": "ref_docname",
@@ -77,7 +79,8 @@
    "in_standard_filter": 1,
    "label": "Status",
    "options": "Queued\nSynced\nFailed\nSkipped",
-   "read_only": 1
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "fieldname": "retry_count",
@@ -163,7 +166,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-13 22:50:56.540940",
+ "modified": "2026-08-27 07:45:21.575242",
  "modified_by": "Administrator",
  "module": "Data Sync",
  "name": "Doc Sync Queue",
