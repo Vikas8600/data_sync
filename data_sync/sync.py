@@ -600,7 +600,11 @@ def upsert_doc(doctype, docname, payload, dropped=None, origin_site=None):
 		doc.update(payload)
 		doc.flags.ignore_permissions = True
 		doc.flags.ignore_mandatory = True
-		doc.flags.ignore_links = True
+		# Links are validated: a document pointing at a master that has not
+		# arrived here yet must not be written with a dangling reference. The
+		# save raises, the row is marked Failed, and the scheduler retries it -
+		# by which time the master it needs has usually landed.
+		doc.flags.ignore_links = False
 		doc.flags.ignore_validate_update_after_submit = True
 		doc.save(ignore_permissions=True)
 
@@ -626,7 +630,9 @@ def upsert_doc(doctype, docname, payload, dropped=None, origin_site=None):
 	doc = frappe.get_doc(payload)
 	doc.flags.ignore_permissions = True
 	doc.flags.ignore_mandatory = True
-	doc.flags.ignore_links = True
+	# See the update path above - a missing link is a retryable failure, not
+	# something to write through.
+	doc.flags.ignore_links = False
 	doc.insert(
 		ignore_permissions=True,
 		set_name=docname,
@@ -647,7 +653,6 @@ def resolve_user(email):
 	if email and frappe.db.exists("User", email):
 		return email
 	return None
-
 
 def restore_audit_fields(doc, audit, is_new):
 	"""Stamp the synced document with the user who made the change on the origin
