@@ -627,6 +627,7 @@ def upsert_doc(doctype, docname, payload, dropped=None, origin_site=None):
 	doc.flags.ignore_permissions = True
 	doc.flags.ignore_mandatory = True
 	doc.flags.ignore_links = True
+	
 	doc.insert(
 		ignore_permissions=True,
 		set_name=docname,
